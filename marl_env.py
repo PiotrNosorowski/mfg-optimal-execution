@@ -1,0 +1,97 @@
+from pettingzoo import ParallelEnv
+from copy import copy
+import numpy as np
+from gymnasium.spaces import Box
+
+class Execution(ParallelEnv):
+
+    metadata = {
+        "name": "custom_environment_v0",
+    }
+
+    def __init__(self, n, kappa, gamma, varphi, T, g0, n_steps, A):
+        self.n = n
+        self.kappa = kappa
+        self.gamma = gamma
+        self.varphi = varphi
+        self.T = T
+        self.g0 = g0
+        self.n_steps = n_steps
+        self.A = A
+        self.dt = T / n_steps              # time step length
+        self.possible_agents = [f"agent_{i}" for i in range(n)]
+
+        # as [u] belongs to the (0, g0) interval 
+        self.action_spaces = {agent: Box(low=0, high=self.g0, shape=(1,)) for agent in self.possible_agents}
+
+        # [g, timestep]
+        # continuous and discrete values mixed, though Box() supports both types
+        # ...and discrete values fits within continuous anyway 
+        # self.observation_spaces = {agent: Box(low=0, high=np.array([self.g0, self.n_steps]), shape=(2,)) for agent in self.possible_agents}
+        # n_steps must have been normalized
+        self.observation_spaces = {agent: Box(low=0, high=np.array([1.0, 1.0]), shape=(2,)) for agent in self.possible_agents}
+
+    def reset(self, seed=None, options=None):
+        self.agents = copy(self.possible_agents)
+        self.timestep = 0
+
+        # agents' initial positions
+        self.positions = {agent: self.g0 for agent in self.agents}  
+
+        # the state of the agents
+        # TIMESTEP MUST BE NORMALIZED                                    
+        observations = {agent: np.array([float(self.positions[agent]) / self.g0, float(self.timestep) / self.n_steps]) for agent in self.agents}
+
+        # API's purposes, remains empty   
+        infos = {agent: {} for agent in self.agents}                     
+
+        return observations, infos
+        
+
+    def step(self, actions):
+        # .values to extract dictionary values; here: selling rates u
+        total_u = sum(actions.values())
+        rewards = {agent: -(self.kappa * actions[agent] ** 2
+                    + self.gamma * self.positions[agent] * total_u
+                    + self.varphi * self.positions[agent] ** 2) * self.dt
+                    for agent in self.agents} 
+
+        # position cannot go below zero, so a constraint is applied
+        self.positions = {agent: max(0, self.positions[agent] - actions[agent] * self.dt) for agent in self.agents}
+
+        # timestep = 1/n_steps
+        self.timestep += 1                # steps counter
+
+        end = self.timestep >= self.n_steps 
+        truncations = {agent: end for agent in self.agents}      # given time limit exceeded (position may still remain open)
+
+        # as position never reaches zero -> no specific game termination exists, so it's never fully solved
+        # ... so False is the setting
+        terminations = {agent: False for agent in self.agents}    # game's end
+
+        # [g,t]
+        # float type added to prevent array doubling (1st term)
+        # float type added for int data type (2nd term)
+        # ... as Box() required homogenous array type
+        observations = {agent: np.array([float(self.positions[agent]) / self.g0, float(self.timestep) / self.n_steps]) for agent in self.agents}
+
+        # unused
+        infos = {agent: {} for agent in self.agents}
+
+        # if game is ended: terminal penalty on what is left, then no active players remain
+        if end:
+            for agent in self.agents:
+                rewards[agent] -= self.A * self.positions[agent] ** 2
+            self.agents = []     # list becomes empty
+
+        # 5 dicts to return
+        return observations, rewards, terminations, truncations, infos
+
+    def render(self):
+        pass
+
+    def observation_space(self, agent):
+        return self.observation_spaces[agent]
+
+    def action_space(self, agent):
+        return self.action_spaces[agent]
